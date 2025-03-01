@@ -5,6 +5,7 @@ import { SelectedClassroomContext } from "./selectedClassroom";
 import { getPaginatedStudentWork } from "@/api/student_works";
 import { getFileTree, gradeWork } from "@/api/grader";
 import { getAssignmentRubric } from "@/api/assignments";
+import { ErrorToast, useActionToast } from "@/components/Toast";
 
 
 interface IGraderContext {
@@ -20,6 +21,7 @@ interface IGraderContext {
   loadingStudentWork: boolean;
   loadingGitTree: boolean;
   dataRetrievalError: boolean;
+  isSubmittingGrade: boolean;
   setSelectedFile: React.Dispatch<React.SetStateAction<IFileTreeNode | null>>;
   addFeedback: (feedback: IGraderFeedback[]) => void;
   editFeedback: (feedbackID: number, feedback: IGraderFeedback) => void;
@@ -43,6 +45,7 @@ export const GraderContext: React.Context<IGraderContext> =
     loadingStudentWork: true,
     loadingGitTree: true,
     dataRetrievalError: false,
+    isSubmittingGrade: false,
     setSelectedFile: () => {},
     addFeedback: () => 0,
     editFeedback: () => {},
@@ -58,6 +61,7 @@ export const GraderProvider: React.FC<{
   children: React.ReactNode;
 }> = ({ assignmentID, studentWorkID, children }) => {
   const { selectedClassroom } = useContext(SelectedClassroomContext);
+  const { executeWithToast } = useActionToast();
 
   const nextFeedbackID = useRef(0);
   const [feedback, setFeedback] = useState<IGraderFeedbackMap>({});
@@ -72,6 +76,7 @@ export const GraderProvider: React.FC<{
   const [dataRetrievalError, setDataRetrievalError] = useState(false)
   const [loadingStudentWork, setLoadingStudentWork] = useState(true)
   const [loadingGitTree, setLoadingGitTree] = useState(true)
+  const [isSubmittingGrade, setIsSubmittingGrade] = useState(false);
 
   const navigate = useNavigate();
 
@@ -82,11 +87,13 @@ export const GraderProvider: React.FC<{
 
     if (!selectedClassroom || !assignmentID) return;
 
-    getAssignmentRubric(selectedClassroom.id, Number(assignmentID)).then(
-      (resp) => {
+    getAssignmentRubric(selectedClassroom.id, Number(assignmentID))
+      .then((resp) => {
         setRubric(resp);
-      }
-    );
+      })
+      .catch((_: unknown) => {
+        ErrorToast("Failed to load assignment rubric. Please try refreshing the page.", "rubric-error");
+      });
   }, [studentWorkID]);
 
   // fetch requested student assignment
@@ -106,20 +113,19 @@ export const GraderProvider: React.FC<{
         setStudentWork(resp.student_work);
         setFeedback(resp.feedback);
         setStagedFeedback({});
-        setLoadingStudentWork(false)
-
+        setLoadingStudentWork(false);
       })
       .catch((_: unknown) => {
-        setDataRetrievalError(true)
-        setLoadingStudentWork(false)
+        setDataRetrievalError(true);
+        setLoadingStudentWork(false);
+        ErrorToast("Failed to load student work. Redirecting to 404 page.", "student-work-error");
         navigate("/404", { replace: true });
       });
-
   }, [studentWorkID]);
 
   // retrieve file tree
   useEffect(() => {
-    setFileTree(null)
+    setFileTree(null);
 
     if (!selectedClassroom || !assignmentID || !studentWorkID) return;
 
@@ -129,14 +135,14 @@ export const GraderProvider: React.FC<{
       Number(studentWorkID)
     ) 
       .then((resp) => {
-        setFileTree(resp)
-        setLoadingGitTree(false)
+        setFileTree(resp);
+        setLoadingGitTree(false);
       })
       .catch((_: unknown) => {
-        setDataRetrievalError(true)
-        setLoadingGitTree(false)
-      })
-
+        setDataRetrievalError(true);
+        setLoadingGitTree(false);
+        ErrorToast("Failed to load file tree. Some features may not work correctly.", "file-tree-error");
+      });
   }, [studentWorkID]);
 
   const getNextFeedbackID = () => {
@@ -166,33 +172,51 @@ export const GraderProvider: React.FC<{
 
   const postFeedback = () => {
     if (!selectedClassroom || !assignmentID || !studentWorkID) return;
-
-    gradeWork(
-      selectedClassroom.id,
-      Number(assignmentID),
-      Number(studentWorkID),
-      stagedFeedback
-    ).then(() => {
-      setStudentWork((prevStudentWork) => {
-        if (prevStudentWork) {
-          return {
-            ...prevStudentWork,
-            manual_feedback_score:
-              prevStudentWork.manual_feedback_score +
-              Object.values(stagedFeedback).reduce(
-                (s: number, fb: IGraderFeedback) => s + fb.points,
-                0
-              ),
-          };
+    
+    setIsSubmittingGrade(true);
+    
+    executeWithToast(
+      "post-feedback-toast",
+      async () => {
+        try {
+          await gradeWork(
+            selectedClassroom.id,
+            Number(assignmentID),
+            Number(studentWorkID),
+            stagedFeedback
+          );
+          
+          setStudentWork((prevStudentWork) => {
+            if (prevStudentWork) {
+              return {
+                ...prevStudentWork,
+                manual_feedback_score:
+                  prevStudentWork.manual_feedback_score +
+                  Object.values(stagedFeedback).reduce(
+                    (s: number, fb: IGraderFeedback) => s + fb.points,
+                    0
+                  ),
+              };
+            }
+            return prevStudentWork;
+          });
+          
+          setFeedback((prevFeedback) => ({
+            ...prevFeedback,
+            ...stagedFeedback,
+          }));
+          
+          setStagedFeedback({});
+        } finally {
+          setIsSubmittingGrade(false);
         }
-        return prevStudentWork;
-      });
-      setFeedback((prevFeedback) => ({
-        ...prevFeedback,
-        ...stagedFeedback,
-      }));
-      setStagedFeedback({});
-    });
+      },
+      {
+        pending: "Submitting grade...",
+        success: "Grade submitted successfully!",
+        error: "Failed to submit grade. Please try again."
+      }
+    );
   };
 
   const selectRubricItem = (riID: number) => {
@@ -225,6 +249,7 @@ export const GraderProvider: React.FC<{
         loadingGitTree,
         loadingStudentWork,
         dataRetrievalError,
+        isSubmittingGrade,
         setSelectedFile,
         addFeedback,
         editFeedback,
